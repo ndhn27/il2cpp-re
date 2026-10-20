@@ -99,6 +99,7 @@ usage errors), `130` interrupted with Ctrl+C.
 il2cpp-re/
 ├── LICENSE                          # GNU AGPL v3.0
 ├── README.md
+├── CHANGELOG.md                     # version history
 ├── requirements.txt
 ├── .gitignore
 ├── dump_clean_header.py             # controller: spawn app, load agent, wait for the RPC, validate and write the header;
