@@ -17,152 +17,6 @@ environment variable at run time.
 > testing and has not been validated experimentally against real-world
 > targets yet — expect rough edges.
 
-## What's new in this version
-
-The original tool had two separate agents with opposite trade-offs: a
-hardcoded-offset hook (fast, but breaks on every app update until the offset
-is re-derived) and a dynamic Stalker scan (update-proof, but slower). This
-version adds a third agent, **v4**, that merges the two:
-
-- If you give it an offset (`--offset`), it tries the fast hook first, with no
-  Stalker overhead.
-- If that offset fires but `x21` doesn't hold a valid header, or `il2cpp_init`
-  returns without any validated header, the agent notices **by event, not by
-  timer**, and the controller relaunches the app once with the full dynamic
-  scan (`--no-retry` disables this, `--eager-scan` arms the full scan in the
-  first run instead).
-- If you don't give it an offset at all, it skips straight to the dynamic
-  scan.
-
-`v4` is now the default agent. The offset is a nice-to-have speed
-optimization, not a requirement. The older `v2` and `v3` agents have moved to
-`agents/legacy/` so `agents/` only shows the one you should use.
-
-Also new: the offset is passed in at run time via `--offset` / an RPC call
-into the agent, instead of requiring you to hand-edit the `HOOK_OFFSET`
-constant in the script; the controller verifies the dumped header's magic
-(and prints the raw version field) before writing the output file; the
-default dump size was bumped from 512 to 1024 bytes for headroom on newer
-IL2CPP metadata layouts; and Ctrl+C now cancels the agent, detaches and kills
-the app the tool spawned instead of dumping a Python traceback.
-
-## Fallback timing and header validation
-
-Two weaknesses of the first v4 are fixed:
-
-- **The fallback used to be armed too late.** The dynamic scan was only
-  installed after a 6 s timer (or from inside the offset hook, i.e. already
-  past `il2cpp_init` entry), so it could miss the only moment it was needed.
-  Now every hook - the offset hook *and* an `il2cpp_init` observer - is
-  installed synchronously inside `configure()`, before the controller resumes
-  the app, and nothing waits on a timer to get armed.
-- **The magic alone no longer proves a header.** A pointer is accepted only
-  after `validateHeader()` passes on the exact bytes that are returned: the
-  whole `--header-size` window must be readable (checked against the process's
-  mappings before reading, with a clear error otherwise), the version must be
-  plausible, and the offset/size pairs must be consistent with the
-  `Il2CppGlobalMetadataHeader` layout for that version (see below). A
-  candidate that fails is remembered and re-checked later, because the buffer
-  may still be getting written.
-
-One trade-off to know about: with `--offset`, Stalker stays off until the fast
-path has failed. A Stalker scan that starts in the middle of `il2cpp_init`
-cannot be made complete, so after a failed offset the agent only does a
-best-effort late scan and the controller then relaunches with a full scan from
-`il2cpp_init` entry. If you'd rather have one launch and accept the slow scan,
-use `--eager-scan`.
-
-## Scan cost and hook lifecycle
-
-Two more weaknesses are fixed in the v4 agent and the controller:
-
-- **The scan used to cost too much.** The Stalker scan put a JS callout after
-  *every* instruction of *every* module and looked at only ten registers
-  (`x0-x3`, `x19-x24`) in each. Now:
-  - **scope** - only `UnityFramework` is instrumented (`--scan-scope module`,
-    the default). `--scan-range START:END` narrows that to a routine you have
-    already located (module-relative, hex, end exclusive); `--scan-scope all`
-    restores the old behaviour.
-  - **granularity** - one callout per *basic block* instead of one per
-    instruction (`--scan-mode block`, the default). `--scan-mode instruction`
-    keeps the exhaustive per-instruction scan, e.g. as a baseline.
-  - **registers** - in block mode only the registers a block actually *reads*
-    are checked (from Frida's `Instruction.regsRead`; `w` registers map to `x`);
-    if that information is unavailable, or in instruction mode, all of
-    `x0-x28` are checked. So a pointer in, say, `x27` is no longer missed.
-  - the pointer prefilter no longer allocates `NativePointer`s per check.
-- **Cleanup was spread out and incomplete.** The agent now has explicit,
-  forward-only phases (`idle -> waiting-module -> armed -> scanning -> done`)
-  and *every* way of finishing - captured, failed, timeout, cancelled - goes
-  through one `complete()` function that first marks the run done (so callbacks
-  still in flight do nothing) and then releases **everything** in one place:
-  the `il2cpp_init` and offset hooks, the module observer (a late load of
-  `UnityFramework` can no longer arm hooks after a timeout), the timeout timer,
-  the Stalker threads and the deferred Stalker GC. New `cancel()` and
-  `dispose()` RPC exports end in the same place (`dispose` is called by Frida
-  when the script is unloaded). Failures that used to wait for the timeout now
-  fail with a reason: an offset that cannot be hooked falls back to the scan
-  at `il2cpp_init` entry; `Stalker.follow` failing, an exception inside a
-  callback, or a rejected configuration end the run immediately. A timeout now
-  says where it got stuck (e.g. "UnityFramework was never loaded").
-- **The controller owns the spawned process.** Whatever happens - failed run,
-  crash, Ctrl+C, a script that fails to load, a rejected configuration - it
-  cancels the agent, unloads the script, detaches and **kills the app it
-  spawned** (previously a failure after `spawn()` could leave a suspended app
-  behind). Only a run that produced a header leaves the app running. Errors
-  from attach/load/configure are reported as one line instead of a traceback.
-
-The limits of the scan are the same as before, just more explicit: a pointer
-that is never held in a general-purpose register while in-scope code runs (only
-in memory or a SIMD register) is invisible to every mode; and in block mode a
-register the current block does not read is not looked at until a later block
-reads it.
-
-### Measuring the scan
-
-`getStatus()` (printed by the controller as "Scan cost") reports how many
-blocks were compiled/instrumented, how many callouts ran, how many register
-checks they made, the scan duration and the time from `il2cpp_init` entry to the
-header. To get a before/after on your own device, run the same target twice:
-
-```bash
-python dump_clean_header.py --target com.example.unityapp                                      # block / module
-python dump_clean_header.py --target com.example.unityapp --scan-mode instruction --scan-scope all   # old behaviour
-```
-
-`tests/test_agent.js` contains a synthetic cost model (counts of callouts and
-register checks for the same trace under both configurations). It shows the
-*shape* of the saving - callouts and register checks drop by well over an order
-of magnitude in that model - but it is counts, not wall-clock time: the real
-saving has to be measured on a device.
-
-## Layout
-
-```
-il2cpp-re/
-├── LICENSE                          # GNU AGPL v3.0
-├── README.md
-├── requirements.txt
-├── .gitignore
-├── dump_clean_header.py             # controller: spawn app, load agent, wait for the RPC, validate and write the header;
-│                                    #   owns the spawned process (cancel/unload/detach/kill on every failure path)
-├── tests/                           # validator, agent-logic, controller-lifecycle and opt-in device tests (see "Tests")
-└── agents/
-    ├── dump_clean_header_v4.js      # RECOMMENDED. Adaptive: fast offset hook, event-driven
-    │                                #   fallback to a scoped, block-level dynamic scan, structural
-    │                                #   header validation, one central cleanup path. Takes its
-    │                                #   config at runtime via `configure()`.
-    └── legacy/                      # Superseded by v4 — kept for manual use / reference only
-        ├── dump_clean_header_v2.js  # Dynamic-scan only (Stalker over il2cpp_init, checks every
-        │                            #   register against the magic at every instruction) — never
-        │                            #   goes stale, just slower.
-        └── dump_clean_header_v3.js  # Hardcoded-offset only, no fallback — hooks straight into
-                                     #   the point where the header has just been deobfuscated
-                                     #   (x21 holds the clean pointer). Fastest option when you
-                                     #   already trust the offset, but the offset needs to be
-                                     #   re-derived every time the module changes.
-```
-
 ## Requirements
 
 - A jailbroken iOS device
@@ -193,7 +47,7 @@ python dump_clean_header.py --target com.example.unityapp --offset 0xab6ad08 --e
 # Narrow the scan to a routine you already located (module-relative, hex, end exclusive)
 python dump_clean_header.py --target com.example.unityapp --scan-range 0xa00000:0xa40000
 
-# Old behaviour for comparison: a callout after every instruction, in every module
+# Exhaustive baseline for comparison: a callout after every instruction, in every module
 python dump_clean_header.py --target com.example.unityapp --scan-mode instruction --scan-scope all
 
 # A real header is rejected by the structural checks (e.g. a metadata version newer than the
@@ -206,16 +60,172 @@ python dump_clean_header.py --target com.example.unityapp --agent agents/legacy/
 ```
 
 The script spawns the target app, injects the agent, resumes the process,
-and waits up to 45s (adjustable with `--timeout`) for `il2cpp_init` to reach
+and waits up to 45 s (`--timeout`, in milliseconds) for `il2cpp_init` to reach
 the point where the header has been fully deobfuscated. The result is
 validated again by the controller (so output from the legacy agents is checked
 too) and written to `clean_header.bin` (adjustable with `--out`) only if it
 passes; otherwise the raw bytes go to `clean_header.rejected.bin` and the
-script exits with status 2. `--header-size` must be at least 272 (0x110, the
-largest known header). The `--scan-*` options only apply to the v4 agent; the
-legacy agents ignore them. When a scan finds the header, the controller prints
-where (`foundAt`: the register and the module-relative address of the block) -
+script exits with status 2. When a scan finds the header, the controller prints
+where (`foundAt`: the register and the module-relative address of the block) —
 a starting point for `--scan-range`.
+
+### Options
+
+| Option | Default | Applies to | Description |
+| --- | --- | --- | --- |
+| `--target`, `-t` | `$TARGET_BUNDLE_ID` | all | Bundle ID of the app to spawn. Required (either the flag or the variable). |
+| `--agent`, `-a` | `agents/dump_clean_header_v4.js` | — | Agent script to inject. |
+| `--offset` | `$HOOK_OFFSET` | v4 | Optional hex offset into `UnityFramework` for the fast-path hook. |
+| `--header-size` | `1024` | v4 | Bytes to dump from the clean header pointer. Between 272 (0x110, the largest known header) and 0x100000. The legacy agents always dump 512 bytes. |
+| `--lenient` | off | v4 + controller | Downgrade the structural header checks to warnings (magic + version stay fatal). |
+| `--eager-scan` | off | v4 | With `--offset`, arm the full scan at `il2cpp_init` entry in the first run. |
+| `--no-retry` | off | v4 | Don't relaunch with a full scan when the offset fast path fails. |
+| `--scan-scope` | `module` | v4 | `module` = only `UnityFramework`; `all` = every module. |
+| `--scan-mode` | `block` | v4 | `block` = one callout per basic block; `instruction` = one per instruction. |
+| `--scan-range` | none | v4 | Limit the scan to `START:END` (module-relative, hex, end exclusive). |
+| `--out`, `-o` | `clean_header.bin` | all | Where to write the validated header. |
+| `--remote` | `$FRIDA_REMOTE`, else `127.0.0.1:45861` | all | frida-server address (matches the port forwarded above). |
+| `--timeout` | `45000` | all | Milliseconds to wait for the header. |
+
+"v4" in the *Applies to* column means the option is only honoured by the v4
+agent; the legacy agents ignore it (v3 uses its hardcoded `HOOK_OFFSET`
+instead). Exit status: `0` header written, `1` run failed or no header
+captured, `2` captured bytes failed validation (also used for command-line
+usage errors), `130` interrupted with Ctrl+C.
+
+## Layout
+
+```
+il2cpp-re/
+├── LICENSE                          # GNU AGPL v3.0
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── dump_clean_header.py             # controller: spawn app, load agent, wait for the RPC, validate and write the header;
+│                                    #   owns the spawned process (cancel/unload/detach/kill on every failure path)
+├── tests/                           # validator, agent-logic, controller-lifecycle and opt-in device tests (see "Tests")
+└── agents/
+    ├── dump_clean_header_v4.js      # RECOMMENDED. Adaptive: fast offset hook, event-driven
+    │                                #   fallback to a scoped, block-level dynamic scan, structural
+    │                                #   header validation, one central cleanup path. Takes its
+    │                                #   config at runtime via `configure()`.
+    └── legacy/                      # Superseded by v4 — kept for manual use / reference only
+        ├── dump_clean_header_v2.js  # Dynamic-scan only (Stalker over il2cpp_init, checks every
+        │                            #   register against the magic at every instruction) — never
+        │                            #   goes stale, just slower.
+        └── dump_clean_header_v3.js  # Hardcoded-offset only, no fallback — hooks straight into
+                                     #   the point where the header has just been deobfuscated
+                                     #   (x21 holds the clean pointer). Fastest option when you
+                                     #   already trust the offset, but the offset needs to be
+                                     #   re-derived every time the module changes.
+```
+
+## How it works
+
+### Two strategies, one agent
+
+The `v4` agent combines a fast hardcoded-offset hook (quick, but the offset
+goes stale on every app update) with a dynamic Stalker scan (update-proof, but
+slower):
+
+- With `--offset`, it tries the fast hook first, with no Stalker overhead.
+- If that offset fires but `x21` doesn't hold a valid header, or `il2cpp_init`
+  returns without any validated header, the agent notices **by event, not by
+  timer**, and the controller relaunches the app once with the full dynamic
+  scan (`--no-retry` disables this, `--eager-scan` arms the full scan in the
+  first run instead).
+- Without an offset it goes straight to the dynamic scan.
+
+The offset is a speed optimization, not a requirement, and it is passed in at
+run time (`--offset`, delivered to the agent through its `configure()` RPC)
+rather than edited into the script.
+
+One trade-off to know about: with `--offset`, Stalker stays off until the fast
+path has failed. A Stalker scan that starts in the middle of `il2cpp_init`
+cannot be made complete, so after a failed offset the agent only does a
+best-effort late scan and the controller then relaunches with a full scan from
+`il2cpp_init` entry. If you'd rather have one launch and accept the slow scan,
+use `--eager-scan`.
+
+### Hook timing and header validation
+
+- **Everything is armed up front.** Every hook — the offset hook *and* an
+  `il2cpp_init` observer — is installed synchronously inside `configure()`,
+  before the controller resumes the app, and nothing waits on a timer to get
+  armed. The dynamic scan therefore starts from `il2cpp_init` entry and
+  cannot miss the only moment it is needed.
+- **The magic alone does not prove a header.** A pointer is accepted only
+  after `validateHeader()` passes on the exact bytes that are returned: the
+  whole `--header-size` window must be readable (checked against the process's
+  mappings before reading, with a clear error otherwise), the version must be
+  plausible, and the offset/size pairs must be consistent with the
+  `Il2CppGlobalMetadataHeader` layout for that version (see *Technical notes*).
+  A candidate that fails is remembered and re-checked later, because the
+  buffer may still be getting written.
+- **The controller validates again.** It checks the magic, prints the raw
+  version field and runs the same structural checks before writing the output
+  file, so what the legacy agents return is verified too.
+
+### The dynamic scan
+
+- **Scope** — only `UnityFramework` is instrumented (`--scan-scope module`,
+  the default). `--scan-range START:END` narrows that to a routine you have
+  already located (module-relative, hex, end exclusive); `--scan-scope all`
+  instruments every module.
+- **Granularity** — one callout per *basic block* (`--scan-mode block`, the
+  default). `--scan-mode instruction` is the exhaustive per-instruction scan,
+  e.g. as a baseline.
+- **Registers** — in block mode only the registers a block actually *reads*
+  are checked (from Frida's `Instruction.regsRead`; `w` registers map to `x`).
+  If that information is unavailable, or in instruction mode, all of `x0-x28`
+  are checked. The pointer prefilter does not allocate `NativePointer`s per
+  check.
+
+The limits of the scan: a pointer that is never held in a general-purpose
+register while in-scope code runs (only in memory or a SIMD register) is
+invisible to every mode; and in block mode a register the current block does
+not read is not looked at until a later block reads it.
+
+### Lifecycle and cleanup
+
+- **One ending for every run.** The agent moves through explicit, forward-only
+  phases (`idle -> waiting-module -> armed -> scanning -> done`). Every way of
+  finishing — captured, failed, timeout, cancelled — goes through one
+  `complete()` function that first marks the run done (so callbacks still in
+  flight do nothing) and then releases **everything** in one place: the
+  `il2cpp_init` and offset hooks, the module observer (a late load of
+  `UnityFramework` cannot arm hooks after a timeout), the timeout timer, the
+  Stalker threads and the deferred Stalker GC. The `cancel()` and `dispose()`
+  RPC exports end in the same place (`dispose` is called by Frida when the
+  script is unloaded).
+- **Failures carry a reason.** An offset that cannot be hooked falls back to
+  the scan at `il2cpp_init` entry; `Stalker.follow` failing, an exception
+  inside a callback, or a rejected configuration end the run immediately; a
+  timeout says where it got stuck (e.g. "UnityFramework was never loaded").
+- **The controller owns the spawned process.** Whatever happens — failed run,
+  crash, Ctrl+C, a script that fails to load, a rejected configuration — it
+  cancels the agent, unloads the script, detaches and **kills the app it
+  spawned**. Only a run that produced a header leaves the app running. Errors
+  from attach/load/configure are reported as one line instead of a traceback,
+  and Ctrl+C exits with status 130.
+
+### Measuring the scan
+
+`getStatus()` (printed by the controller as "Scan cost") reports how many
+blocks were compiled/instrumented, how many callouts ran, how many register
+checks they made, the scan duration and the time from `il2cpp_init` entry to the
+header. To compare configurations on your own device, run the same target twice:
+
+```bash
+python dump_clean_header.py --target com.example.unityapp                                      # block / module
+python dump_clean_header.py --target com.example.unityapp --scan-mode instruction --scan-scope all   # exhaustive baseline
+```
+
+`tests/test_agent.js` contains a synthetic cost model (counts of callouts and
+register checks for the same trace under both configurations). It shows the
+*shape* of the saving - callouts and register checks drop by well over an order
+of magnitude in that model - but it is counts, not wall-clock time: the real
+saving has to be measured on a device.
 
 ## Technical notes
 
@@ -237,7 +247,7 @@ a starting point for `--scan-range`.
 - `v4`'s offset (whether from `--offset` or, in `v3`, the hardcoded
   `HOOK_OFFSET`) is a fixed location inside the current build's IL2CPP
   module — it needs to be re-derived (e.g. via ADRP cross-reference tracing
-  in a disassembler) after an app update shifts it. With `v4` this is now
+  in a disassembler) after an app update shifts it. With `v4` this is
   optional: without it, or when it's stale, the tool just falls back to the
   slower dynamic scan instead of failing outright.
 
