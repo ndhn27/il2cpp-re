@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 ndhn27
+
 // dump_clean_header_v2.js
 // No hardcoded offset. Instead: hook il2cpp_init, use Stalker to single-step
 // through every instruction in the function, and at each instruction check

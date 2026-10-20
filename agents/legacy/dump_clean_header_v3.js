@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 ndhn27
+
 // dump_clean_header_v3.js
 // Same idea as the original version, just with HOOK_OFFSET pointed at the
 // location re-derived with relocate_offset.py for the current

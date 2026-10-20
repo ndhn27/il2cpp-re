@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 ndhn27
+
 // dump_clean_header_v4.js
 // Adaptive agent that merges v2 (dynamic Stalker scan) and v3 (hardcoded
 // offset hook) into a single strategy:
@@ -17,7 +20,7 @@
 //   3. If no offset is supplied at all, the agent skips straight to the
 //      dynamic scan.
 //
-// This means the offset in agents/dump_clean_header_v3.js (or --offset on
+// This means the offset in agents/legacy/dump_clean_header_v3.js (or --offset on
 // the CLI) is now an optional speed optimization, not a hard requirement -
 // the tool keeps working across app updates without needing the offset
 // re-derived every time, it just gets slower until someone re-derives it.

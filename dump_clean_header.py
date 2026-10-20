@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 ndhn27
+
 """
 dump_clean_header.py
 Spawns a target iOS app, loads a Frida agent, and makes a single blocking RPC
@@ -47,8 +50,8 @@ def parse_args():
         default="agents/dump_clean_header_v4.js",
         help="Path to the Frida agent script to inject "
              "(default: agents/dump_clean_header_v4.js, the adaptive agent). "
-             "Use agents/dump_clean_header_v2.js for scan-only, or "
-             "agents/dump_clean_header_v3.js for offset-only with no fallback.",
+             "Use agents/legacy/dump_clean_header_v2.js for scan-only, or "
+             "agents/legacy/dump_clean_header_v3.js for offset-only with no fallback.",
     )
     parser.add_argument(
         "--offset",

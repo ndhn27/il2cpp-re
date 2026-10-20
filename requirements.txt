@@ -1,0 +1,8 @@
+# Runtime dependency of dump_clean_header.py (the only third-party import).
+# >=16.7.0 is required: the agents call Process.attachModuleObserver(), which
+# does not exist in earlier Frida releases.
+# The Python `frida` major version must match the frida-server on the device.
+frida>=16.7.0
+
+# Optional: CLI helpers (frida-ps, frida-trace, ...). Not imported by this repo.
+# frida-tools>=12.0.0

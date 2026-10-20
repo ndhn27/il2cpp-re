@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# --- Secrets / local config ---
+.env
+.env.*
+
+# --- Tool output ---
+# Default output of dump_clean_header.py (--out)
+clean_header.bin
+*.bin
+
+# --- Analysis artifacts from the target app (never commit these) ---
+# Third-party binaries / metadata / dumper output - usually copyrighted and large.
+*.ipa
+*.dylib
+UnityFramework
+UnityFramework.*
+global-metadata.dat
+dump.cs
+DummyDll/
+il2cpp.h
+script.json
+stringliteral.json
+
+# --- Node (if you add frida-compile / TypeScript tooling later) ---
+node_modules/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

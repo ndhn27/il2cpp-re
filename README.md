@@ -13,6 +13,10 @@ environment variable at run time.
 > explicitly authorized to test) — running it against a third-party app may
 > violate that app's Terms of Service; that's on you.
 
+> **Status:** research prototype. The code was written for research and
+> testing and has not been validated experimentally against real-world
+> targets yet — expect rough edges.
+
 ## What's new in this version
 
 The original tool had two separate agents with opposite trade-offs: a
@@ -29,7 +33,8 @@ version adds a third agent, **v4**, that merges the two:
   scan.
 
 `v4` is now the default agent. The offset is a nice-to-have speed
-optimization, not a requirement.
+optimization, not a requirement. The older `v2` and `v3` agents have moved to
+`agents/legacy/` so `agents/` only shows the one you should use.
 
 Also new: the offset is passed in at run time via `--offset` / an RPC call
 into the agent, instead of requiring you to hand-edit the `HOOK_OFFSET`
@@ -43,19 +48,24 @@ a Python traceback.
 
 ```
 il2cpp-re/
-├── dump_clean_header.py          # controller: spawn app, load agent, wait for the RPC to return the header
+├── LICENSE                          # GNU AGPL v3.0
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── dump_clean_header.py             # controller: spawn app, load agent, wait for the RPC to return the header
 └── agents/
-    ├── dump_clean_header_v4.js   # RECOMMENDED. Adaptive: fast offset hook with automatic
-    │                               fallback to the dynamic scan. Takes its offset at
-    │                               runtime via `configure()`.
-    ├── dump_clean_header_v2.js   # Legacy/manual. Dynamic-scan only (Stalker over il2cpp_init,
-    │                               checks every register against the magic at every
-    │                               instruction) — never goes stale, just slower.
-    └── dump_clean_header_v3.js   # Legacy/manual. Hardcoded-offset only, no fallback — hooks
-    │                               straight into the point where the header has just been
-    │                               deobfuscated (x21 holds the clean pointer). Fastest option
-    │                               when you already trust the offset, but the offset needs to
-    │                               be re-derived every time the module changes.
+    ├── dump_clean_header_v4.js      # RECOMMENDED. Adaptive: fast offset hook with automatic
+    │                                #   fallback to the dynamic scan. Takes its offset at
+    │                                #   runtime via `configure()`.
+    └── legacy/                      # Superseded by v4 — kept for manual use / reference only
+        ├── dump_clean_header_v2.js  # Dynamic-scan only (Stalker over il2cpp_init, checks every
+        │                            #   register against the magic at every instruction) — never
+        │                            #   goes stale, just slower.
+        └── dump_clean_header_v3.js  # Hardcoded-offset only, no fallback — hooks straight into
+                                     #   the point where the header has just been deobfuscated
+                                     #   (x21 holds the clean pointer). Fastest option when you
+                                     #   already trust the offset, but the offset needs to be
+                                     #   re-derived every time the module changes.
 ```
 
 ## Requirements
@@ -67,7 +77,9 @@ il2cpp-re/
   ```
   pymobiledevice3 usbmux forward 45861 45861
   ```
-- Python 3 + `pip install frida frida-tools`
+- Python 3 + `pip install -r requirements.txt` (installs `frida` ≥ 16.7, which
+  the agents need for `Process.attachModuleObserver`). The Python `frida`
+  major version must match the `frida-server` on the device.
 
 ## Usage
 
@@ -81,8 +93,8 @@ TARGET_BUNDLE_ID=com.example.unityapp python dump_clean_header.py
 python dump_clean_header.py --target com.example.unityapp --offset 0xab6ad08
 
 # Force the legacy scan-only or offset-only agents
-python dump_clean_header.py --target com.example.unityapp --agent agents/dump_clean_header_v2.js
-python dump_clean_header.py --target com.example.unityapp --agent agents/dump_clean_header_v3.js
+python dump_clean_header.py --target com.example.unityapp --agent agents/legacy/dump_clean_header_v2.js
+python dump_clean_header.py --target com.example.unityapp --agent agents/legacy/dump_clean_header_v3.js
 ```
 
 The script spawns the target app, injects the agent, resumes the process,
@@ -101,3 +113,16 @@ verified before writing.
   in a disassembler) after an app update shifts it. With `v4` this is now
   optional: without it, or when it's stale, the tool just falls back to the
   slower dynamic scan instead of failing outright.
+
+## License
+
+Copyright (C) 2026 [ndhn27](https://github.com/ndhn27).
+
+Licensed under the **GNU Affero General Public License v3.0 only**
+(`AGPL-3.0-only`) — see [`LICENSE`](LICENSE) for the full text. In short: you
+are free to use, study, modify and redistribute this project, but if you
+distribute a modified version — or let users interact with one over a
+network — you must make the complete corresponding source available under the
+same license, and keep the copyright and license notices intact.
+
+This software is provided without any warranty.
